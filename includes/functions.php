@@ -37,6 +37,319 @@ function authenticateUser($username, $password) {
             return ['success' => false, 'message' => 'Invalid credentials'];
         }
         
+    } catch (Exception $e) {
+        logError("Error updating member savings balance: " . $e->getMessage());
+        throw $e;
+    }
+}
+
+// ================================================
+// LOAN FUNCTIONS
+// ================================================
+
+/**
+ * Generate loan number
+ */
+function generateLoanNumber() {
+    return generateReference('LOAN', 10);
+}
+
+/**
+ * Calculate loan monthly payment
+ */
+function calculateLoanPayment($principal, $interestRate, $tenureMonths, $method = 'reducing_balance') {
+    if ($method === 'reducing_balance') {
+        $monthlyRate = $interestRate / 100 / 12;
+        if ($monthlyRate == 0) return $principal / $tenureMonths;
+        
+        return $principal * ($monthlyRate * pow(1 + $monthlyRate, $tenureMonths)) / 
+               (pow(1 + $monthlyRate, $tenureMonths) - 1);
+    } else {
+        // Fixed interest
+        $totalInterest = $principal * ($interestRate / 100) * ($tenureMonths / 12);
+        return ($principal + $totalInterest) / $tenureMonths;
+    }
+}
+
+/**
+ * Generate loan repayment schedule
+ */
+function generateLoanSchedule($loanId, $principal, $interestRate, $tenureMonths, $startDate) {
+    try {
+        $db = Database::getInstance();
+        
+        // Call stored procedure
+        $db->execute(
+            "CALL CalculateLoanSchedule(?, ?, ?, ?, ?)",
+            [$loanId, $principal, $interestRate, $tenureMonths, $startDate]
+        );
+        
+        return true;
+        
+    } catch (Exception $e) {
+        logError("Error generating loan schedule: " . $e->getMessage());
+        return false;
+    }
+}
+
+// ================================================
+// FILE UPLOAD FUNCTIONS
+// ================================================
+
+/**
+ * Handle file upload
+ */
+function handleFileUpload($file, $uploadType = 'documents', $allowedTypes = null) {
+    try {
+        if (!isset($file['tmp_name']) || !is_uploaded_file($file['tmp_name'])) {
+            return ['success' => false, 'message' => 'No file uploaded'];
+        }
+        
+        // Check file size
+        $maxSize = ($uploadType === 'member_photos') ? MAX_IMAGE_SIZE : MAX_FILE_SIZE;
+        if ($file['size'] > $maxSize) {
+            return ['success' => false, 'message' => 'File too large'];
+        }
+        
+        // Get file extension
+        $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        
+        // Validate file type
+        $allowedTypes = $allowedTypes ?: (
+            ($uploadType === 'member_photos') 
+                ? ALLOWED_IMAGE_TYPES 
+                : array_merge(ALLOWED_IMAGE_TYPES, ALLOWED_DOCUMENT_TYPES)
+        );
+        
+        if (!in_array($extension, $allowedTypes)) {
+            return ['success' => false, 'message' => 'File type not allowed'];
+        }
+        
+        // Generate unique filename
+        $filename = uniqid() . '_' . time() . '.' . $extension;
+        
+        // Get upload directory
+        $uploadDir = getUploadPath($uploadType);
+        $filepath = $uploadDir . '/' . $filename;
+        
+        // Move uploaded file
+        if (move_uploaded_file($file['tmp_name'], $filepath)) {
+            return [
+                'success' => true,
+                'filename' => $filename,
+                'filepath' => $filepath,
+                'url' => getUploadUrl($uploadType) . '/' . $filename
+            ];
+        } else {
+            return ['success' => false, 'message' => 'Failed to save file'];
+        }
+        
+    } catch (Exception $e) {
+        logError("File upload error: " . $e->getMessage());
+        return ['success' => false, 'message' => 'Upload failed'];
+    }
+}
+
+// ================================================
+// UTILITY FUNCTIONS
+// ================================================
+
+/**
+ * Generate pagination HTML
+ */
+function generatePagination($currentPage, $totalPages, $baseUrl, $params = []) {
+    if ($totalPages <= 1) return '';
+    
+    $html = '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
+    
+    // Previous button
+    $prevDisabled = ($currentPage <= 1) ? 'disabled' : '';
+    $prevPage = max(1, $currentPage - 1);
+    $prevUrl = buildUrl($baseUrl, array_merge($params, ['page' => $prevPage]));
+    
+    $html .= '<li class="page-item ' . $prevDisabled . '">';
+    $html .= '<a class="page-link" href="' . $prevUrl . '">Previous</a>';
+    $html .= '</li>';
+    
+    // Page numbers
+    $start = max(1, $currentPage - 2);
+    $end = min($totalPages, $currentPage + 2);
+    
+    if ($start > 1) {
+        $url = buildUrl($baseUrl, array_merge($params, ['page' => 1]));
+        $html .= '<li class="page-item"><a class="page-link" href="' . $url . '">1</a></li>';
+        if ($start > 2) {
+            $html .= '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+    }
+    
+    for ($i = $start; $i <= $end; $i++) {
+        $active = ($i == $currentPage) ? 'active' : '';
+        $url = buildUrl($baseUrl, array_merge($params, ['page' => $i]));
+        
+        $html .= '<li class="page-item ' . $active . '">';
+        $html .= '<a class="page-link" href="' . $url . '">' . $i . '</a>';
+        $html .= '</li>';
+    }
+    
+    if ($end < $totalPages) {
+        if ($end < $totalPages - 1) {
+            $html .= '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+        $url = buildUrl($baseUrl, array_merge($params, ['page' => $totalPages]));
+        $html .= '<li class="page-item"><a class="page-link" href="' . $url . '">' . $totalPages . '</a></li>';
+    }
+    
+    // Next button
+    $nextDisabled = ($currentPage >= $totalPages) ? 'disabled' : '';
+    $nextPage = min($totalPages, $currentPage + 1);
+    $nextUrl = buildUrl($baseUrl, array_merge($params, ['page' => $nextPage]));
+    
+    $html .= '<li class="page-item ' . $nextDisabled . '">';
+    $html .= '<a class="page-link" href="' . $nextUrl . '">Next</a>';
+    $html .= '</li>';
+    
+    $html .= '</ul></nav>';
+    
+    return $html;
+}
+
+/**
+ * Build URL with parameters
+ */
+function buildUrl($baseUrl, $params = []) {
+    if (empty($params)) return $baseUrl;
+    
+    $queryString = http_build_query($params);
+    $separator = (strpos($baseUrl, '?') !== false) ? '&' : '?';
+    
+    return $baseUrl . $separator . $queryString;
+}
+
+/**
+ * Redirect with message
+ */
+function redirect($url, $message = null, $type = 'info') {
+    if ($message && function_exists('session')) {
+        session()->flash($type, $message);
+    }
+    
+    header("Location: $url");
+    exit;
+}
+
+/**
+ * JSON response
+ */
+function jsonResponse($data, $httpCode = 200) {
+    http_response_code($httpCode);
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
+/**
+ * Require login
+ */
+function requireLogin() {
+    if (!isLoggedIn()) {
+        redirect('index.php?error=login_required');
+    }
+}
+
+/**
+ * Require permission
+ */
+function requirePermission($permission) {
+    requireLogin();
+    
+    if (!hasPermission($permission)) {
+        redirect('dashboard.php?error=access_denied');
+    }
+}
+
+/**
+ * Check if user is logged in
+ */
+function isLoggedIn() {
+    return function_exists('session') && session()->isLoggedIn();
+}
+
+/**
+ * Get current user data
+ */
+function currentUser() {
+    return function_exists('session') ? session()->getUser() : null;
+}
+
+/**
+ * Check if user has permission
+ */
+function hasPermission($permission) {
+    return function_exists('session') && session()->hasPermission($permission);
+}
+
+/**
+ * Get CSRF token field
+ */
+function csrfField() {
+    $token = function_exists('session') ? session()->generateCsrfToken() : '';
+    return '<input type="hidden" name="' . CSRF_TOKEN_NAME . '" value="' . htmlspecialchars($token) . '">';
+}
+
+/**
+ * Get CSRF token
+ */
+function csrfToken() {
+    return function_exists('session') ? session()->generateCsrfToken() : '';
+}
+
+/**
+ * Get flash message
+ */
+function getFlashMessage($key) {
+    return function_exists('session') ? session()->flash($key) : null;
+}
+
+/**
+ * Set flash message
+ */
+function setFlashMessage($key, $message) {
+    if (function_exists('session')) {
+        session()->flash($key, $message);
+    }
+}
+
+/**
+ * Get database instance
+ */
+function db() {
+    return Database::getInstance();
+}
+
+/**
+ * Get database connection
+ */
+function dbConnection() {
+    return Database::getInstance()->getConnection();
+}
+
+/**
+ * Create tooltip
+ */
+function createTooltip($element, $text) {
+    // This would be implemented in JavaScript
+    return true;
+}
+
+/**
+ * Remove tooltip
+ */
+function removeTooltip() {
+    // This would be implemented in JavaScript
+    return true;
+}
+
         // Check if chama group is active
         if ($user['chama_status'] !== 'Active') {
             return ['success' => false, 'message' => 'Your chama group is currently inactive'];
@@ -327,7 +640,7 @@ function recordTransaction($data) {
         }
         
         // Insert transaction
-        $transactionId = $db->execute(
+        $db->execute(
             "INSERT INTO transactions (
                 chama_group_id, transaction_number, transaction_type, amount, 
                 description, reference_number, payment_method, payment_reference,
@@ -349,7 +662,7 @@ function recordTransaction($data) {
                 $data['loan_id'] ?? null,
                 $data['target_id'] ?? null,
                 $data['transaction_date'] ?? date('Y-m-d H:i:s'),
-                $data['processed_by'] ?? session()->getUserId(),
+                $data['processed_by'] ?? (function_exists('session') ? session()->getUserId() : 1),
                 $data['status'] ?? 'Completed',
                 $data['notes'] ?? ''
             ]
@@ -367,7 +680,9 @@ function recordTransaction($data) {
         return ['success' => true, 'transaction_id' => $transactionId];
         
     } catch (Exception $e) {
-        $db->rollback();
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
         logError("Error recording transaction: " . $e->getMessage());
         return ['success' => false, 'message' => 'Failed to record transaction'];
     }
@@ -399,472 +714,3 @@ function updateMemberSavingsBalance($memberId, $amount, $transactionType) {
                 [$amount, $amount, $memberId]
             );
         }
-        
-    } catch (Exception $e) {
-        logError("Error updating member savings balance: " . $e->getMessage());
-        throw $e;
-    }
-}
-
-// ================================================
-// LOAN FUNCTIONS
-// ================================================
-
-/**
- * Generate loan number
- */
-function generateLoanNumber() {
-    return generateReference('LOAN', 10);
-}
-
-/**
- * Calculate loan monthly payment
- */
-function calculateLoanPayment($principal, $interestRate, $tenureMonths, $method = 'reducing_balance') {
-    if ($method === 'reducing_balance') {
-        $monthlyRate = $interestRate / 100 / 12;
-        if ($monthlyRate == 0) return $principal / $tenureMonths;
-        
-        return $principal * ($monthlyRate * pow(1 + $monthlyRate, $tenureMonths)) / 
-               (pow(1 + $monthlyRate, $tenureMonths) - 1);
-    } else {
-        // Fixed interest
-        $totalInterest = $principal * ($interestRate / 100) * ($tenureMonths / 12);
-        return ($principal + $totalInterest) / $tenureMonths;
-    }
-}
-
-/**
- * Generate loan repayment schedule
- */
-function generateLoanSchedule($loanId, $principal, $interestRate, $tenureMonths, $startDate) {
-    try {
-        $db = Database::getInstance();
-        
-        // Call stored procedure
-        $db->execute(
-            "CALL CalculateLoanSchedule(?, ?, ?, ?, ?)",
-            [$loanId, $principal, $interestRate, $tenureMonths, $startDate]
-        );
-        
-        return true;
-        
-    } catch (Exception $e) {
-        logError("Error generating loan schedule: " . $e->getMessage());
-        return false;
-    }
-}
-
-// ================================================
-// PAYMENT INTEGRATION FUNCTIONS
-// ================================================
-
-/**
- * Initialize M-Pesa STK Push
- */
-function initiateMpesaPayment($phone, $amount, $reference, $description) {
-    try {
-        // Format phone number
-        $phone = formatPhone($phone);
-        
-        // Generate access token
-        $accessToken = getMpesaAccessToken();
-        if (!$accessToken) {
-            return ['success' => false, 'message' => 'Failed to get M-Pesa access token'];
-        }
-        
-        // Prepare STK Push request
-        $timestamp = date('YmdHis');
-        $password = base64_encode(MPESA_SHORTCODE . MPESA_PASSKEY . $timestamp);
-        
-        $data = [
-            'BusinessShortCode' => MPESA_SHORTCODE,
-            'Password' => $password,
-            'Timestamp' => $timestamp,
-            'TransactionType' => 'CustomerPayBillOnline',
-            'Amount' => (int) $amount,
-            'PartyA' => $phone,
-            'PartyB' => MPESA_SHORTCODE,
-            'PhoneNumber' => $phone,
-            'CallBackURL' => MPESA_CALLBACK_URL,
-            'AccountReference' => $reference,
-            'TransactionDesc' => $description
-        ];
-        
-        $url = (MPESA_ENVIRONMENT === 'live') 
-            ? 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest'
-            : 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
-        
-        $response = makeCurlRequest($url, $data, [
-            'Authorization: Bearer ' . $accessToken,
-            'Content-Type: application/json'
-        ]);
-        
-        return $response;
-        
-    } catch (Exception $e) {
-        logError("M-Pesa payment error: " . $e->getMessage());
-        return ['success' => false, 'message' => 'Payment initialization failed'];
-    }
-}
-
-/**
- * Get M-Pesa access token
- */
-function getMpesaAccessToken() {
-    try {
-        $credentials = base64_encode(MPESA_CONSUMER_KEY . ':' . MPESA_CONSUMER_SECRET);
-        
-        $url = (MPESA_ENVIRONMENT === 'live')
-            ? 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
-            : 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
-        
-        $response = makeCurlRequest($url, null, [
-            'Authorization: Basic ' . $credentials,
-            'Content-Type: application/json'
-        ]);
-        
-        return $response['success'] ? $response['data']['access_token'] : null;
-        
-    } catch (Exception $e) {
-        logError("M-Pesa token error: " . $e->getMessage());
-        return null;
-    }
-}
-
-/**
- * Make CURL request
- */
-function makeCurlRequest($url, $data = null, $headers = []) {
-    $curl = curl_init();
-    
-    curl_setopt_array($curl, [
-        CURLOPT_URL => $url,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_ENCODING => '',
-        CURLOPT_MAXREDIRS => 10,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-        CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_SSL_VERIFYPEER => false
-    ]);
-    
-    if ($data) {
-        curl_setopt($curl, CURLOPT_CUSTOMREQUEST, 'POST');
-        curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($data));
-    }
-    
-    $response = curl_exec($curl);
-    $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-    $error = curl_error($curl);
-    
-    curl_close($curl);
-    
-    if ($error) {
-        return ['success' => false, 'message' => $error];
-    }
-    
-    $decodedResponse = json_decode($response, true);
-    
-    return [
-        'success' => $httpCode >= 200 && $httpCode < 300,
-        'http_code' => $httpCode,
-        'data' => $decodedResponse,
-        'raw_response' => $response
-    ];
-}
-
-// ================================================
-// NOTIFICATION FUNCTIONS
-// ================================================
-
-/**
- * Send SMS notification
- */
-function sendSMS($phone, $message, $priority = 'Normal') {
-    if (!featureEnabled('SMS_NOTIFICATIONS')) {
-        return ['success' => false, 'message' => 'SMS notifications disabled'];
-    }
-    
-    try {
-        $db = Database::getInstance();
-        
-        // Queue the SMS
-        $db->execute(
-            "INSERT INTO notifications (
-                chama_group_id, notification_type, message, recipient_phone, priority, status
-            ) VALUES (?, 'SMS', ?, ?, ?, 'Pending')",
-            [currentChamaGroup(), $message, formatPhone($phone), $priority]
-        );
-        
-        // Process immediately if not in queue mode
-        return processSMSQueue();
-        
-    } catch (Exception $e) {
-        logError("SMS sending error: " . $e->getMessage());
-        return ['success' => false, 'message' => 'Failed to send SMS'];
-    }
-}
-
-/**
- * Process SMS queue
- */
-function processSMSQueue() {
-    try {
-        $db = Database::getInstance();
-        
-        // Get pending SMS notifications
-        $notifications = $db->fetchAll(
-            "SELECT * FROM notifications 
-             WHERE notification_type = 'SMS' AND status = 'Pending' 
-             ORDER BY priority DESC, created_at ASC 
-             LIMIT 10"
-        );
-        
-        foreach ($notifications as $notification) {
-            $result = sendSMSViaProvider($notification['recipient_phone'], $notification['message']);
-            
-            $status = $result['success'] ? 'Sent' : 'Failed';
-            $failedReason = $result['success'] ? null : $result['message'];
-            
-            $db->execute(
-                "UPDATE notifications 
-                 SET status = ?, failed_reason = ?, sent_at = ?, attempts = attempts + 1 
-                 WHERE id = ?",
-                [$status, $failedReason, date('Y-m-d H:i:s'), $notification['id']]
-            );
-        }
-        
-        return ['success' => true, 'processed' => count($notifications)];
-        
-    } catch (Exception $e) {
-        logError("SMS queue processing error: " . $e->getMessage());
-        return ['success' => false, 'message' => 'Failed to process SMS queue'];
-    }
-}
-
-/**
- * Send SMS via provider (Africa's Talking)
- */
-function sendSMSViaProvider($phone, $message) {
-    try {
-        if (SMS_DRIVER !== 'africastalking') {
-            return ['success' => false, 'message' => 'SMS provider not configured'];
-        }
-        
-        $data = [
-            'username' => SMS_USERNAME,
-            'to' => $phone,
-            'message' => $message,
-            'from' => SMS_SENDER_ID
-        ];
-        
-        $response = makeCurlRequest(
-            'https://api.africastalking.com/version1/messaging',
-            $data,
-            [
-                'ApiKey: ' . SMS_API_KEY,
-                'Content-Type: application/x-www-form-urlencoded'
-            ]
-        );
-        
-        return $response;
-        
-    } catch (Exception $e) {
-        logError("SMS provider error: " . $e->getMessage());
-        return ['success' => false, 'message' => 'SMS provider error'];
-    }
-}
-
-// ================================================
-// FILE UPLOAD FUNCTIONS
-// ================================================
-
-/**
- * Handle file upload
- */
-function handleFileUpload($file, $uploadType = 'documents', $allowedTypes = null) {
-    try {
-        if (!isset($file['tmp_name']) || !is_uploaded_file($file['tmp_name'])) {
-            return ['success' => false, 'message' => 'No file uploaded'];
-        }
-        
-        // Check file size
-        $maxSize = ($uploadType === 'member_photos') ? MAX_IMAGE_SIZE : MAX_FILE_SIZE;
-        if ($file['size'] > $maxSize) {
-            return ['success' => false, 'message' => 'File too large'];
-        }
-        
-        // Get file extension
-        $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-        
-        // Validate file type
-        $allowedTypes = $allowedTypes ?: (
-            ($uploadType === 'member_photos') 
-                ? ALLOWED_IMAGE_TYPES 
-                : array_merge(ALLOWED_IMAGE_TYPES, ALLOWED_DOCUMENT_TYPES)
-        );
-        
-        if (!in_array($extension, $allowedTypes)) {
-            return ['success' => false, 'message' => 'File type not allowed'];
-        }
-        
-        // Generate unique filename
-        $filename = uniqid() . '_' . time() . '.' . $extension;
-        
-        // Get upload directory
-        $uploadDir = getUploadPath($uploadType);
-        $filepath = $uploadDir . '/' . $filename;
-        
-        // Move uploaded file
-        if (move_uploaded_file($file['tmp_name'], $filepath)) {
-            return [
-                'success' => true,
-                'filename' => $filename,
-                'filepath' => $filepath,
-                'url' => getUploadUrl($uploadType) . '/' . $filename
-            ];
-        } else {
-            return ['success' => false, 'message' => 'Failed to save file'];
-        }
-        
-    } catch (Exception $e) {
-        logError("File upload error: " . $e->getMessage());
-        return ['success' => false, 'message' => 'Upload failed'];
-    }
-}
-
-// ================================================
-// UTILITY FUNCTIONS
-// ================================================
-
-/**
- * Generate pagination HTML
- */
-function generatePagination($currentPage, $totalPages, $baseUrl, $params = []) {
-    if ($totalPages <= 1) return '';
-    
-    $html = '<nav aria-label="Page navigation"><ul class="pagination justify-content-center">';
-    
-    // Previous button
-    $prevDisabled = ($currentPage <= 1) ? 'disabled' : '';
-    $prevPage = max(1, $currentPage - 1);
-    $prevUrl = buildUrl($baseUrl, array_merge($params, ['page' => $prevPage]));
-    
-    $html .= '<li class="page-item ' . $prevDisabled . '">';
-    $html .= '<a class="page-link" href="' . $prevUrl . '">Previous</a>';
-    $html .= '</li>';
-    
-    // Page numbers
-    $start = max(1, $currentPage - 2);
-    $end = min($totalPages, $currentPage + 2);
-    
-    if ($start > 1) {
-        $url = buildUrl($baseUrl, array_merge($params, ['page' => 1]));
-        $html .= '<li class="page-item"><a class="page-link" href="' . $url . '">1</a></li>';
-        if ($start > 2) {
-            $html .= '<li class="page-item disabled"><span class="page-link">...</span></li>';
-        }
-    }
-    
-    for ($i = $start; $i <= $end; $i++) {
-        $active = ($i == $currentPage) ? 'active' : '';
-        $url = buildUrl($baseUrl, array_merge($params, ['page' => $i]));
-        
-        $html .= '<li class="page-item ' . $active . '">';
-        $html .= '<a class="page-link" href="' . $url . '">' . $i . '</a>';
-        $html .= '</li>';
-    }
-    
-    if ($end < $totalPages) {
-        if ($end < $totalPages - 1) {
-            $html .= '<li class="page-item disabled"><span class="page-link">...</span></li>';
-        }
-        $url = buildUrl($baseUrl, array_merge($params, ['page' => $totalPages]));
-        $html .= '<li class="page-item"><a class="page-link" href="' . $url . '">' . $totalPages . '</a></li>';
-    }
-    
-    // Next button
-    $nextDisabled = ($currentPage >= $totalPages) ? 'disabled' : '';
-    $nextPage = min($totalPages, $currentPage + 1);
-    $nextUrl = buildUrl($baseUrl, array_merge($params, ['page' => $nextPage]));
-    
-    $html .= '<li class="page-item ' . $nextDisabled . '">';
-    $html .= '<a class="page-link" href="' . $nextUrl . '">Next</a>';
-    $html .= '</li>';
-    
-    $html .= '</ul></nav>';
-    
-    return $html;
-}
-
-/**
- * Build URL with parameters
- */
-function buildUrl($baseUrl, $params = []) {
-    if (empty($params)) return $baseUrl;
-    
-    $queryString = http_build_query($params);
-    $separator = (strpos($baseUrl, '?') !== false) ? '&' : '?';
-    
-    return $baseUrl . $separator . $queryString;
-}
-
-/**
- * Redirect with message
- */
-function redirect($url, $message = null, $type = 'info') {
-    if ($message) {
-        session()->flash($type, $message);
-    }
-    
-    header("Location: $url");
-    exit;
-}
-
-/**
- * JSON response
- */
-function jsonResponse($data, $httpCode = 200) {
-    http_response_code($httpCode);
-    header('Content-Type: application/json');
-    echo json_encode($data);
-    exit;
-}
-
-/**
- * Require login
- */
-function requireLogin() {
-    if (!isLoggedIn()) {
-        redirect('/index.php?error=login_required');
-    }
-}
-
-/**
- * Require permission
- */
-function requirePermission($permission) {
-    requireLogin();
-    
-    if (!hasPermission($permission)) {
-        redirect('/dashboard.php?error=access_denied');
-    }
-}
-
-/**
- * Get flash message
- */
-function getFlashMessage($key) {
-    return session()->flash($key);
-}
-
-/**
- * Set flash message
- */
-function setFlashMessage($key, $message) {
-    session()->flash($key, $message);
-}
-
-?>
